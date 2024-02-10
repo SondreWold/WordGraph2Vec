@@ -132,4 +132,9 @@ if __name__ == "__main__":
         logging.info(f"Prompt: {prompt}: Response: {output}")
 
     if args.model_output_path:
-        torch.save(model.state_dict(), args.model_output_path)
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'vocab': len(training_data.vocab),
+            'indexer': training_data.word_to_ix,
+            'inverter': training_data.ix_to_word
+            }, args.model_output_path)
