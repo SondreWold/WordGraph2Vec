@@ -122,7 +122,6 @@ if __name__ == "__main__":
             total_loss += loss.item()
             loss.backward()
             optimizer.step()
-            break
         logger.info('Epoch %d, loss %f' % (epoch, total_loss))
 
         model.eval()
