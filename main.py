@@ -22,7 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window", type=int, default=5, help="Context window size")
     parser.add_argument("--layers", type=int, default=3, help="Number of GNN layers")
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
-    parser.add_argument("--hidden_size", type=int, default=300, help="Embedding size")
+    parser.add_argument("--hidden_size", type=int, default=200, help="Embedding size")
     args = parser.parse_args()
     return args
 
@@ -63,6 +63,9 @@ class Grapher(torch.nn.Module):
         self.convs = torch.nn.ModuleList(
                 [GATConv(hidden_size, hidden_size, 1) for _ in range(layers)]
                 )
+        self.lins = torch.nn.ModuleList(
+                [nn.Linear(hidden_size, hidden_size) for _ in range(layers)]
+                )
         self.out = nn.Linear(hidden_size, vocab_size)
 
     def forward(self, data):
@@ -73,8 +76,10 @@ class Grapher(torch.nn.Module):
         nodes = data.x.to(device)
         edges = data.edge_index.to(device)
         x = self.embedding(nodes)
-        for layer in self.convs:
-            x = layer(x, edges)
+        for gnn, lin in zip(self.convs, self.lins):
+            x = gnn(x, edges)
+            x = nn.functional.relu(x)
+            x = lin(x)
         out = global_mean_pool(x, batch=batch)
         return self.out(out)
 
@@ -102,11 +107,11 @@ if __name__ == "__main__":
     args: argparse.Namespace = parse_args()
     logging.info(f"{args.corpus}")
     training_data = TextGraphDataset(args.corpus, window=args.window)
-    train_loader = DataLoader(training_data, batch_size=32, drop_last=True)
+    train_loader = DataLoader(training_data, batch_size=64, drop_last=True)
 
     criterion = nn.CrossEntropyLoss()
     model = Grapher(len(training_data.vocab), hidden_size=args.hidden_size, layers=args.layers).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     num_params = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of parameters: {num_params}")
     logging.info(f"Training sample: {training_data.data[3]}")
