@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Data
 from device import device
+import math
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window", type=int, default=5, help="Context window size")
     parser.add_argument("--layers", type=int, default=3, help="Number of GNN layers")
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
-    parser.add_argument("--hidden_size", type=int, default=200, help="Embedding size")
+    parser.add_argument("--hidden_size", type=int, default=300, help="Embedding size")
     args = parser.parse_args()
     return args
 
@@ -107,14 +108,28 @@ if __name__ == "__main__":
     args: argparse.Namespace = parse_args()
     logging.info(f"{args.corpus}")
     training_data = TextGraphDataset(args.corpus, window=args.window)
-    train_loader = DataLoader(training_data, batch_size=64, drop_last=True)
+    train_loader = DataLoader(training_data, batch_size=32, drop_last=True)
 
     criterion = nn.CrossEntropyLoss()
     model = Grapher(len(training_data.vocab), hidden_size=args.hidden_size, layers=args.layers).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     num_params = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of parameters: {num_params}")
     logging.info(f"Training sample: {training_data.data[3]}")
+    device_max_steps = args.epochs * len(train_loader)
+    warmup_proportion = 0.016
+
+
+    def cosine_schedule_with_warmup(optimizer, num_warmup_steps: int, num_training_steps: int, min_factor: float):
+        def lr_lambda(current_step):
+            if current_step < num_warmup_steps:
+                return float(current_step) / float(max(1, num_warmup_steps))
+            progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+            lr = max(min_factor, min_factor + (1 - min_factor) * 0.5 * (1.0 + math.cos(math.pi * progress)))
+            return lr
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scheduler = cosine_schedule_with_warmup(optimizer, int(device_max_steps * warmup_proportion), device_max_steps, 0.1)
+
 
     for epoch in range(args.epochs):
         total_loss = 0
@@ -127,6 +142,7 @@ if __name__ == "__main__":
             total_loss += loss.item()
             loss.backward()
             optimizer.step()
+            scheduler.step()
         logger.info('Epoch %d, loss %f' % (epoch, total_loss))
 
         model.eval()
