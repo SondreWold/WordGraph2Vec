@@ -1,49 +1,54 @@
+from device import device
 from smart_open import open 
-import random
-from tqdm import tqdm, trange
+from torch.utils.data import Dataset
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
+from torch_geometric.nn import GCNConv, GATConv, global_mean_pool
+from tqdm import tqdm
+from typing import List, Tuple, Dict
 import argparse
 import logging
+import math
 import numpy as np
-from torch_geometric.nn import GCNConv, GATConv, global_mean_pool
 import pathlib
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset
-from torch_geometric.loader import DataLoader
-from torch_geometric.data import Data
-from device import device
-import math
-
 
 def parse_args() -> argparse.Namespace:
     """ Return namespace cotnaining CLI arguments. """
     parser = argparse.ArgumentParser(description="CLI for WordGraph2Vec")
     parser.add_argument("--corpus", type=pathlib.Path, default=None, help="Path to the training corpus")
+    parser.add_argument("--val_corpus", type=pathlib.Path, default=None, help="Path to the validation corpus")
     parser.add_argument("--model_output_path", type=pathlib.Path, default=None, help="Save model to path")
     parser.add_argument("--window", type=int, default=5, help="Context window size")
     parser.add_argument("--layers", type=int, default=3, help="Number of GNN layers")
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
+    parser.add_argument("--log_step", type=int, default=100, help="Number of epochs")
     parser.add_argument("--hidden_size", type=int, default=300, help="Embedding size")
     args = parser.parse_args()
     return args
 
 
 class TextGraphDataset(Dataset):
-    def __init__(self, corpus: pathlib.Path, window:int):
+    def __init__(self, corpus: pathlib.Path, window: int, indexer: Dict[str, int] = None):
         self.corpus: pathlib.Path = corpus
-        CONTEXT_SIZE = window
-        
+        CONTEXT_SIZE: int = window
         self.vocab = set()
-        self.data = []
+        self.data: List[Tuple[List[str], str]] = []
         for line in tqdm(open(self.corpus, 'r')):
-            sentence = line.split()
+            sentence: List[str] = line.split()
             self.vocab.update(sentence)
             for i in range(CONTEXT_SIZE, len(sentence)):
-                context = [sentence[i - (c + 1)] for c in range(CONTEXT_SIZE)]
-                target = sentence[i]
+                context: List[str] = [sentence[i - (c + 1)] for c in range(CONTEXT_SIZE)]
+                target: str = sentence[i]
                 self.data.append((context, target))
-        self.word_to_ix = {word: i for i, word in enumerate(self.vocab)}
-        self.ix_to_word = {self.word_to_ix[word]: word for word in self.word_to_ix}
+
+        if not indexer:
+            self.word_to_ix: Dict[str, int] = {word: i for i, word in enumerate(self.vocab)}
+            self.ix_to_word: Dict[int, str]= {self.word_to_ix[word]: word for word in self.word_to_ix}
+        else:
+            self.word_to_ix = indexer
+            self.ix_to_word: Dict[int, str]= {self.word_to_ix[word]: word for word in self.word_to_ix}
 
     def __len__(self):
         return len(self.data)
@@ -58,31 +63,31 @@ class TextGraphDataset(Dataset):
 
 
 class Grapher(torch.nn.Module):
-    def __init__(self, vocab_size: int, hidden_size: int, layers: int):
+    def __init__(self, vocab_size: int, hidden_size: int, layers: int, heads: int = 1):
         super(Grapher, self).__init__()
         self.embedding = nn.Embedding(vocab_size, hidden_size)
         self.convs = torch.nn.ModuleList(
-                [GATConv(hidden_size, hidden_size, 1) for _ in range(layers)]
+                [GATConv(hidden_size, hidden_size, heads) for _ in range(layers)]
                 )
         self.lins = torch.nn.ModuleList(
                 [nn.Linear(hidden_size, hidden_size) for _ in range(layers)]
                 )
         self.out = nn.Linear(hidden_size, vocab_size)
 
-    def forward(self, data):
-        if self.training:
-            batch = data.batch.to(device)
-        else:
+    def forward(self, data, test=False):
+        if test:
             batch = None
-        nodes = data.x.to(device)
-        edges = data.edge_index.to(device)
-        x = self.embedding(nodes)
+        else:
+            batch = data.batch.to(device)
+        nodes: torch.Tensor = data.x.to(device)  # [BATCH_SIZE * |V|]]
+        edges: torch.Tensor  = data.edge_index.to(device)  # [2, num_edges]
+        x = self.embedding(nodes)  # [BATCH_SIZE * |V|, H]
         for gnn, lin in zip(self.convs, self.lins):
             x = gnn(x, edges)
             x = nn.functional.relu(x)
             x = lin(x)
-        out = global_mean_pool(x, batch=batch)
-        return self.out(out)
+        out = global_mean_pool(x, batch=batch)  # [BATCH_SIZE, H]
+        return self.out(out)  # [32, VOCAB]
 
     def generate(self, prompt, indexer, inverter, max_new_tokens):
         output = prompt.split()
@@ -92,12 +97,26 @@ class Grapher(torch.nn.Module):
             adj_matrix = torch.ones((n, n)) - torch.eye(n)
             adj_matrix = adj_matrix.nonzero().t().contiguous()
             test_graph = Data(nodes, adj_matrix)
-            logits = self(test_graph)
+            logits = self(test_graph, test=True)
             probs = nn.functional.softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             w = inverter[idx_next.item()]
             output.append(w)    
         return " ".join(output)
+
+@torch.no_grad()
+def estimate_loss(val_loader):
+    model.eval()
+    val_loss = 0.0
+    perplexity = 0.0
+    for data, label in val_loader:
+        label = label.to(device)
+        output = model(data)
+        loss = criterion(output, label)
+        val_loss += loss.item()
+        perplexity += torch.exp(loss)
+    logging.info(f"Average validation loss: {val_loss/len(val_loader)}, Validation perplexity: {perplexity/len(val_loader)}")
+    model.train()
 
 
 if __name__ == "__main__":
@@ -108,7 +127,9 @@ if __name__ == "__main__":
     args: argparse.Namespace = parse_args()
     logging.info(f"{args.corpus}")
     training_data = TextGraphDataset(args.corpus, window=args.window)
+    validation_data = TextGraphDataset(args.val_corpus, window=args.window, indexer=training_data.word_to_ix)
     train_loader = DataLoader(training_data, batch_size=32, drop_last=True)
+    validation_loader = DataLoader(validation_data, batch_size=8, drop_last=True)
 
     criterion = nn.CrossEntropyLoss()
     model = Grapher(len(training_data.vocab), hidden_size=args.hidden_size, layers=args.layers).to(device)
@@ -116,6 +137,7 @@ if __name__ == "__main__":
     num_params = sum([p.numel() for p in model.parameters()])
     logging.info(f"Number of parameters: {num_params}")
     logging.info(f"Training sample: {training_data.data[3]}")
+    logging.info(f"Validation sample: {validation_data.data[3]}")
     device_max_steps = args.epochs * len(train_loader)
     warmup_proportion = 0.016
 
@@ -134,7 +156,7 @@ if __name__ == "__main__":
     for epoch in range(args.epochs):
         total_loss = 0
         model.train()
-        for graph, target in tqdm(train_loader):
+        for i, (graph, target) in enumerate(tqdm(train_loader)):
             target = target.to(device)
             optimizer.zero_grad()
             output = model(graph)
@@ -143,11 +165,13 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
             scheduler.step()
-        logger.info('Epoch %d, loss %f' % (epoch, total_loss))
+            if i % args.log_step == 0:
+                estimate_loss(validation_loader)
+        logger.info('Epoch %d, Training loss %f' % (epoch, total_loss/len(train_loader)))
 
         model.eval()
         with torch.no_grad():
-            prompt = "The capital of Norway is a city that has a lot to do , such as"
+            prompt = "The point of this project is to see if I can create something that works almost as good as the"
             output = model.generate(prompt, training_data.word_to_ix, training_data.ix_to_word, 20)
         logging.info(f"Prompt: {prompt}: Response: {output}")
 
