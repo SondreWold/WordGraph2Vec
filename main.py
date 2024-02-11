@@ -1,4 +1,5 @@
 from device import device
+from collections import defaultdict
 from smart_open import open 
 from torch.utils.data import Dataset
 from torch_geometric.data import Data
@@ -33,7 +34,7 @@ class TextGraphDataset(Dataset):
     def __init__(self, corpus: pathlib.Path, window: int, indexer: Dict[str, int] = None):
         self.corpus: pathlib.Path = corpus
         CONTEXT_SIZE: int = window
-        self.vocab = set()
+        self.vocab = set(["UNK"])
         self.data: List[Tuple[List[str], str]] = []
         for line in tqdm(open(self.corpus, 'r')):
             sentence: List[str] = line.split()
@@ -48,6 +49,7 @@ class TextGraphDataset(Dataset):
             self.ix_to_word: Dict[int, str]= {self.word_to_ix[word]: word for word in self.word_to_ix}
         else:
             self.word_to_ix = indexer
+            self.word_to_ix = defaultdict(lambda: 0, self.word_to_ix)
             self.ix_to_word: Dict[int, str]= {self.word_to_ix[word]: word for word in self.word_to_ix}
 
     def __len__(self):
