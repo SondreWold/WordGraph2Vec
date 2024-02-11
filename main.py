@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 def parse_args() -> argparse.Namespace:
-    """ Return namespace cotnaining CLI arguments. """
+    """ Return namespace conaining CLI arguments. """
     parser = argparse.ArgumentParser(description="CLI for WordGraph2Vec")
     parser.add_argument("--corpus", type=pathlib.Path, default=None, help="Path to the training corpus")
     parser.add_argument("--val_corpus", type=pathlib.Path, default=None, help="Path to the validation corpus")
