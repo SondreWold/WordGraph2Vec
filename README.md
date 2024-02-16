@@ -1,4 +1,4 @@
-# Grapher, a GNN-based generative language model 
+# Grapher: a GNN-based generative language model 
 
 Text sequences can be transformed into corresponding word graphs.
 
